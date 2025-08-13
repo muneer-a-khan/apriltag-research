@@ -9,8 +9,8 @@ import math
 robot = Robot("192.168.1.162")
 
 #robot.set_dynamic_rel(0.05)
-robot.velocity_rel = 0.5
-robot.acceleration_rel= 0.1 
+robot.velocity_rel = 0.2
+robot.acceleration_rel= 0.1
 robot.jerk_rel = 0.01 
 
 
@@ -19,7 +19,7 @@ gripper.move(gripper.max_width)
 # gripper.clamp()
 
 # Participant positions
-front_participant1 = Affine(0.707606, 0.342310, 0.025363, 0.786420, -0.103324, 3.116335)
+front_participant1 = Affine(0.372051, 0.446391, 0.010591, -0.037295, 0.060070, 3.131526)
 front_participant2 = Affine(0.589359, -0.476112, 0.021552, -0.590697, -0.003814, -3.138619)
 
 # Thicker audio device(?) properties
@@ -28,21 +28,25 @@ speaker_map = [ # 1 = occupied, 0 = not occupied
 	[0,0],
 	[0,0]]
 
+component_map = [
+	[0,0,0,0],
+	[0,0,0,0],
+	[0,0,0,0]
+]
+
 offset_vertical_speaker = 0.0762 # 3 inches
 offset_horizontal_speaker = offset_vertical_speaker * 2 # 6 inches
 
-base_pos_speaker = Affine(0.506582, -0.079381, 0.016463, -0.015178, -0.032764, 3.140617) # base position for audio-speaker things... what even are thobj_2Dmapose??
+base_pos_speaker = Affine(0.482111, 0.047504, 0.031231, 0, 0, 3.141592) # base position for audio-speaker things... what even are those??
 object_motion_speaker = LinearMotion(base_pos_speaker)
 
+offset_vertical_component = 0.0762
+offset_horizontal_component = 0.508 # 2 inches
+
+base_pos_component = Affine(0.489510, -0.256121, 0.023687, 1.57079, 0, 3.141592)
+obj_motion_component = LinearMotion(base_pos_component)
 
 m_ideal_pos = JointMotion([0.0, -0.4, 0.0, -1.95, 0.0, 1.6, 0.7])
-
-
-# Thinner circuit component(s) properties
-component_map = []
-offset_vertical_component = 0
-offset_horizontal_component = 0
-base_pos_component = Affine(0,0,0,0,0,0)
 
 # Large speaker properties
 
@@ -50,6 +54,7 @@ base_pos_component = Affine(0,0,0,0,0,0)
 def place_at_participant(base_pos, offset_horizontal, offset_vertical, pickup_coords, obj_2Dmap, participant_pos):
 	x = pickup_coords[0]
 	y = pickup_coords[1]
+	print(obj_2Dmap)
 	if obj_2Dmap[y][x] != 1:
 		print("Not occupied")
 		return
@@ -77,23 +82,44 @@ def replace_object(base_pos, offset_horizontal, offset_vertical, dest_coords, ob
 	obj_2Dmap[y_dest][x_dest] = 1
 	
 	dest_vector = Affine(y_dest * offset_vertical, -x_dest * offset_horizontal, 0,0,0,0)
+
 	dest_pos = LinearMotion(base_pos * dest_vector)
 	object_pos = LinearMotion(participant_pos)
 
-	robot.move(m_ideal_pos)
+	#robot.move(m_ideal_pos)
 	robot.move(object_pos)
 	gripper.clamp()
+	# slight vertical movement so the gripper doesn't accidentally move anything
 	robot.move(m_ideal_pos)
 	robot.move(dest_pos)
 	gripper.move(gripper.max_width)
 	robot.move(m_ideal_pos)
 	return obj_2Dmap
 
+def setup(map):
+	if map == speaker_map:
+		base_pos = base_pos_speaker
+		offset_h = offset_horizontal_speaker
+		offset_v = offset_vertical_speaker
+	else: # map = component map
+		base_pos = base_pos_component
+		offset_h = offset_horizontal_component
+		offset_v = offset_vertical_component
 
-# picking up object
-speaker_map = place_at_participant(base_pos_speaker, offset_horizontal_speaker, offset_vertical_speaker, (1,1), speaker_map, front_participant1)
-speaker_map = replace_object(base_pos_speaker, offset_horizontal_speaker, offset_vertical_speaker, (1,1), speaker_map, front_participant1)
+	for i in range(len(map)):
+		for j in range(len(map[0])):
+			map = replace_object(base_pos, offset_h, offset_v, (j, i), map, front_participant1)
+	
+	return map
 
+
+#speaker_map = setup(speaker_map)
+component_map = setup(component_map)
+
+#speaker_map = place_at_participant(base_pos_speaker, offset_horizontal_speaker, offset_vertical_speaker, (0,2), speaker_map, front_participant1)
+#speaker_map = replace_object(base_pos_speaker, offset_horizontal_speaker, offset_vertical_speaker, (0,2), speaker_map, front_participant1)
+#component_map = place_at_participant(base_pos_component, offset_horizontal_component, offset_vertical_component, (0,0), component_map, front_participant1)
+#component_map = replace_object(base_pos_component, offset_horizontal_component, offset_vertical_component, (0,0), component_map, front_participant1)
 
 # Cartesian pose:
     # Pose:  [0.5, 0.0, 0.5, 0.0, 0.0, 0.0]
