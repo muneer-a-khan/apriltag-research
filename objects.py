@@ -100,7 +100,7 @@ class Action:
         self._participant = participant         
         self._base_action = base_action          
         self._component = component              
-        self._reward = self.calculate_reward()   
+        self._reward = self.calculate_reward()   # amount of helpfulness to the participant the action would provide
 
     def set_participant(self, participant: Participant):
         self._participant = participant
@@ -123,17 +123,38 @@ class Action:
         self._reward = reward
 
     def calculate_reward(self) -> float:
-        reward = 0.0
-        skill = self._participant.get_skill()
-        value = self._base_action.value
+        base_reward = self._base_action.value
         
-        # Placeholder logic for reward calculation
+        # Exploratory logic for reward calculation
+        # Assume a full circuit requires 10 components.
+        target_components = 10
+        
+        # Calculate how many components have been assembled so far.
+        current_circuit = self._participant.get_current_circuit()
+        if current_circuit is None:
+            current_count = 0
+        else:
+            current_count = len(current_circuit.get_components())
+        
+        # Calculate remaining components, ensuring at least 1.
+        remaining = max(target_components - current_count, 1)
+        
+        # If fewer components remain, the component is more critical.
+        circuit_completion_factor = target_components / remaining
+        
+        # Check if the component is a core component.
+        if hasattr(self._component, 'is_core') and self._component.is_core:
+            core_bonus = 1.5
+        else:
+            core_bonus = 1.0
+
+        reward = base_reward * circuit_completion_factor * core_bonus
         self._reward = reward
         return self._reward
 
 class Robot:
     def __init__(self):
-        self._queued_action: Action = None  # changed public variable to private
+        self._queued_action: Action = None 
 
     def get_queued_action(self) -> Action:
         return self._queued_action
