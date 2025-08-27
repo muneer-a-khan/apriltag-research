@@ -19,16 +19,16 @@ part_map = {
 
 def main():
     # Initialize video capture (0 = default  webcam)
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
 
     # Initialize the AprilTag detector
     detector = Detector(
         families="tag36h11",
-        nthreads=1,
-        quad_decimate=1.0,
-        quad_sigma=0.0,
+        nthreads=3,
+        quad_decimate=3.0,
+        quad_sigma=0.8,
         refine_edges=1,
-        decode_sharpening=0.25,
+        decode_sharpening=0.5,
         debug=0
         )
 
