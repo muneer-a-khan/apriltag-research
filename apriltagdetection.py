@@ -1,13 +1,20 @@
 import cv2
-import apriltag
+from pupil_apriltags import Detector
+import math
 
 # Define which AprilTag ID corresponds to which Snap Circuit part
 part_map = {
-    0: "Battery Pack",
-    1: "LED",
-    2: "Switch",
+    0: "Wire",
+    1: "Music",
+    2: "Speaker",
     3: "Resistor",
-    4: "Speaker",
+    4: "Switch",
+    5: "Button",
+    6: "Capacitor",
+    7: "LED",
+    8: "Diode",
+    9: "Anti-parallel Diode",
+    10: "Battery"
 }
 
 def main():
@@ -15,7 +22,15 @@ def main():
     cap = cv2.VideoCapture(0)
 
     # Initialize the AprilTag detector
-    detector = apriltag.Detector()
+    detector = Detector(
+        families="tag36h11",
+        nthreads=1,
+        quad_decimate=1.0,
+        quad_sigma=0.0,
+        refine_edges=1,
+        decode_sharpening=0.25,
+        debug=0
+        )
 
     while True:
         ret, frame = cap.read()
@@ -31,6 +46,16 @@ def main():
         for detection in detections:
             tag_id = detection.tag_id
             center = tuple(map(int, detection.center))
+
+            # Calculate orientation:
+            # Use the vector from corner 0 to corner 1 as reference.
+            corners = detection.corners.astype(int)
+            dx = corners[1][0] - corners[0][0]
+            dy = corners[1][1] - corners[0][1]
+            angle_rad = math.atan2(dy, dx)
+            angle_deg = math.degrees(angle_rad)
+
+            print(f"Detected tag ID: {tag_id} at {center} with orientation {angle_deg:.2f} degrees")
 
             # Draw circle at tag center
             cv2.circle(frame, center, 5, (0, 255, 0), -1)
