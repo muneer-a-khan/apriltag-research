@@ -7,7 +7,7 @@ import networkx as nx
 from datetime import datetime
 import os
 
-# Define which AprilTag ID corresponds to which Snap Circuit part
+# Define which AprilTag ID corresponds to which Snap Circuit part (legacy for display)
 part_map = {
     0: "Wire",
     1: "Music", 
@@ -22,8 +22,145 @@ part_map = {
     10: "Battery"
 }
 
+# Enhanced component definition: Maps tag_id to a dict with name and terminal info.
+component_db = {
+    # Wires are simple connectors. They have two interchangeable terminals.
+    0: {"name": "Wire", "terminals": {"A": {"polarity": "neutral"}, "B": {"polarity": "neutral"}}},
+
+    # Battery has fixed polarity. Terminal A is positive (+), B is negative (-).
+    10: {"name": "Battery", "terminals": {"A": {"polarity": "positive"}, "B": {"polarity": "negative"}}},
+
+    # LED has polarity. The anode (A) must be more positive than the cathode (K).
+    7: {"name": "LED", "terminals": {"A": {"polarity": "anode"}, "K": {"polarity": "cathode"}}},
+
+    # Diode has polarity like LED.
+    8: {"name": "Diode", "terminals": {"A": {"polarity": "anode"}, "K": {"polarity": "cathode"}}},
+    9: {"name": "Anti-parallel Diode", "terminals": {"A": {"polarity": "anode"}, "K": {"polarity": "cathode"}}},
+
+    # Resistor, Switch, Button, Capacitor are non-polarized. Terminals are interchangeable.
+    3: {"name": "Resistor", "terminals": {"A": {"polarity": "neutral"}, "B": {"polarity": "neutral"}}},
+    4: {"name": "Switch", "terminals": {"A": {"polarity": "neutral"}, "B": {"polarity": "neutral"}}},
+    5: {"name": "Button", "terminals": {"A": {"polarity": "neutral"}, "B": {"polarity": "neutral"}}},
+    6: {"name": "Capacitor", "terminals": {"A": {"polarity": "neutral"}, "B": {"polarity": "neutral"}}},
+
+    # Speaker and Music are typically non-polarized for simple circuits.
+    2: {"name": "Speaker", "terminals": {"A": {"polarity": "neutral"}, "B": {"polarity": "neutral"}}},
+    1: {"name": "Music", "terminals": {"A": {"polarity": "neutral"}, "B": {"polarity": "neutral"}}},
+}
+
 # Connection distance threshold (pixels)
 CONNECTION_THRESHOLD = 100
+
+def analyze_circuit_logic(detections, connection_threshold=100):
+    """
+    Analyzes the logical layout of the circuit from AprilTag detections.
+    Returns a dictionary with the netlist, errors, and warnings.
+    """
+    if not detections:
+        return {"nets": {}, "errors": [], "warnings": ["No components detected."], "components": {}, "is_valid": True}
+
+    # 1. Create Component Objects with Terminal Info
+    components = {}
+    for det in detections:
+        tag_id = det.tag_id
+        comp_info = component_db.get(tag_id, {"name": f"Unknown_{tag_id}", "terminals": {"A": {"polarity": "neutral"}, "B": {"polarity": "neutral"}}})
+        components[tag_id] = {
+            "type": comp_info["name"],
+            "position": det.center,
+            "terminals": {term: {"net_id": None} for term in comp_info["terminals"]}, # Initialize net_id to None
+            "terminal_polarity": comp_info["terminals"] # Store the polarity info for validation later
+        }
+
+    # 2. Find Physical Connections & Assign Nets (Graph Connected Components)
+    # A "Net" is a unique electrical node. All terminals connected by wires are on the same net.
+    net_id_counter = 0
+    nets = {} # Format: net_id: {"component_terminals": [(tag_id, terminal_name), ...]}
+
+    # Helper function to propagate a net_id to all connected components
+    def flood_fill_net(start_tag_id, current_net_id):
+        stack = [start_tag_id]
+        processed = set()
+        
+        while stack:
+            current_tag_id = stack.pop()
+            if current_tag_id in processed:
+                continue
+            processed.add(current_tag_id)
+            
+            current_comp = components[current_tag_id]
+
+            # For each terminal in the current component, assign the net_id
+            for term_name in current_comp["terminals"]:
+                if current_comp["terminals"][term_name]["net_id"] is None:
+                    current_comp["terminals"][term_name]["net_id"] = current_net_id
+                    # Add this terminal to the net's list
+                    nets[current_net_id]["component_terminals"].append( (current_tag_id, term_name) )
+
+            # Now, find all physically connected neighbors and add them to the stack
+            for other_tag_id, other_comp in components.items():
+                if other_tag_id == current_tag_id or other_tag_id in processed:
+                    continue # Skip self or already processed
+                # Check proximity (your existing logic)
+                dist = math.sqrt((current_comp['position'][0] - other_comp['position'][0])**2 +
+                               (current_comp['position'][1] - other_comp['position'][1])**2)
+                if dist < connection_threshold:
+                    # If this neighbor hasn't been assigned a net, assign it and process it
+                    if all(term_info["net_id"] is None for term_info in other_comp["terminals"].values()):
+                        stack.append(other_tag_id)
+
+    # Iterate through all components. If a component has no net, start a new net.
+    for tag_id, comp in components.items():
+        if all(term_info["net_id"] is None for term_info in comp["terminals"].values()):
+            net_id_counter += 1
+            nets[net_id_counter] = {"component_terminals": []}
+            flood_fill_net(tag_id, net_id_counter)
+
+    # 3. Validate Circuit Rules
+    errors = []
+    warnings = []
+
+    # Check for polarity conflicts on each net
+    for net_id, net_data in nets.items():
+        polarities_on_net = {}
+        # Collect all polarities present on this net
+        for (tag_id, term_name) in net_data["component_terminals"]:
+            comp_polarity = components[tag_id]["terminal_polarity"][term_name]["polarity"]
+            comp_type = components[tag_id]["type"]
+
+            # Map polarity to a "direction". Positive forces high voltage, negative forces low.
+            polarity_value = None
+            if comp_polarity in ["positive", "anode"]:
+                polarity_value = +1
+            elif comp_polarity in ["negative", "cathode"]:
+                polarity_value = -1
+            else: # neutral
+                polarity_value = 0
+
+            if polarity_value != 0:
+                polarities_on_net[(tag_id, term_name)] = (comp_type, polarity_value)
+
+        # Check if this net has conflicting driving polarities (e.g., two positives is ok, +1 and -1 is bad)
+        unique_driving_forces = set(polarity for (_, (_, polarity)) in polarities_on_net.items())
+        if +1 in unique_driving_forces and -1 in unique_driving_forces:
+            conflict_details = []
+            for (tag_id, term_name), (comp_type, pol) in polarities_on_net.items():
+                if pol != 0:
+                    conflict_details.append(f"{comp_type}(ID:{tag_id}-{term_name})")
+            errors.append(f"Polarity Conflict on Net {net_id}: {' and '.join(conflict_details)} are shorted together.")
+
+    # 4. Return the logical analysis results
+    # Format the nets for easier reading in the output
+    formatted_nets = {}
+    for net_id, net_data in nets.items():
+        formatted_nets[net_id] = [f"Comp{tag_id}.{term}" for (tag_id, term) in net_data["component_terminals"]]
+
+    return {
+        "components": components, # The enhanced component data
+        "nets": formatted_nets,   # A simple list of what's on each net
+        "errors": errors,
+        "warnings": warnings,
+        "is_valid": len(errors) == 0 # Circuit is logically valid if no errors
+    }
 
 def create_graph_visualization(detections_left, detections_right, frame_shape):
     """Create a graph visualization of the AprilTag connections"""
@@ -121,21 +258,32 @@ def calculate_validation_score(detections):
                                        detection.corners[1][0] - detection.corners[0][0]))
         part_name = part_map.get(tag_id, f"Unknown({tag_id})")
         
-        # Validation rules for different component types
+        # Functional orientation validation (electrical requirements)
         is_valid_orientation = True
-        if part_name in ["LED", "Diode", "Battery"]:
-            # These components should be oriented horizontally or vertically
-            normalized_angle = angle % 90
-            if normalized_angle > 45:
-                normalized_angle = 90 - normalized_angle
-            is_valid_orientation = normalized_angle < 15  # Within 15 degrees of cardinal direction
-        elif part_name in ["Switch", "Button"]:
-            # Switches and buttons can have more flexible orientation
-            normalized_angle = angle % 45
-            if normalized_angle > 22.5:
-                normalized_angle = 45 - normalized_angle
-            is_valid_orientation = normalized_angle < 22.5  # Within 22.5 degrees
-        # Wire, Music, Speaker, Resistor, Capacitor can be in any orientation
+        
+        if part_name in ["LED", "Diode"]:
+            # These components have polarity - need to check if they're oriented 
+            # for proper current flow in the circuit context
+            # For now, we'll check if they're reasonably aligned (not sideways)
+            # In a real implementation, we'd check actual terminal connections
+            normalized_angle = abs(angle % 180)  # 0-180 range
+            if normalized_angle > 90:
+                normalized_angle = 180 - normalized_angle
+            # Allow more flexibility - just not completely sideways
+            is_valid_orientation = normalized_angle < 45  # Within 45 degrees of forward/backward
+            
+        elif part_name == "Battery":
+            # Battery polarity matters, but orientation is more flexible
+            # Main concern is + and - terminals connecting to right places
+            # For basic validation, just ensure it's not at a weird angle
+            normalized_angle = abs(angle % 180)
+            if normalized_angle > 90:
+                normalized_angle = 180 - normalized_angle
+            is_valid_orientation = normalized_angle < 60  # Pretty flexible
+            
+        # Components where orientation doesn't matter functionally:
+        # Switch, Button - can be flipped 180° and work the same
+        # Wire, Music, Speaker, Resistor, Capacitor - no directionality
         
         orientation_details[tag_id] = {
             'part_name': part_name,
@@ -192,14 +340,22 @@ def validate_connections(detections):
         
         part_name = part_map.get(tag_id, f"Unknown({tag_id})")
         
-        # Simple validation rules
+        # Functional orientation validation (same as main validation)
         is_valid_orientation = True
-        if part_name in ["LED", "Diode", "Battery"]:
-            # These components should be oriented horizontally or vertically
-            normalized_angle = angle % 90
-            if normalized_angle > 45:
-                normalized_angle = 90 - normalized_angle
-            is_valid_orientation = normalized_angle < 15  # Within 15 degrees of cardinal direction
+        
+        if part_name in ["LED", "Diode"]:
+            # Components with polarity - check they're not sideways
+            normalized_angle = abs(angle % 180)
+            if normalized_angle > 90:
+                normalized_angle = 180 - normalized_angle
+            is_valid_orientation = normalized_angle < 45
+            
+        elif part_name == "Battery":
+            # Battery polarity matters but more flexible
+            normalized_angle = abs(angle % 180)
+            if normalized_angle > 90:
+                normalized_angle = 180 - normalized_angle
+            is_valid_orientation = normalized_angle < 60
         
         validation_results.append({
             'tag_id': tag_id,
@@ -298,6 +454,10 @@ def main():
         detections_left = process_detections(frame, left_gray, detector, "LEFT", 0)
         detections_right = process_detections(frame, right_gray, detector, "RIGHT", mid_width)
 
+        # Analyze the logical circuit for each side
+        left_analysis = analyze_circuit_logic(detections_left, CONNECTION_THRESHOLD)
+        right_analysis = analyze_circuit_logic(detections_right, CONNECTION_THRESHOLD)
+
         # Draw dividing line
         cv2.line(frame, (mid_width, 0), (mid_width, height), (0, 255, 255), 3)
         
@@ -325,6 +485,24 @@ def main():
                    (50, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, left_color, 1)
         cv2.putText(frame, f"Orient: {right_details['orientation_score']:.0f}% | Conn: {right_details['connection_score']:.0f}%", 
                    (mid_width + 50, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, right_color, 1)
+
+        # Display logical validation results
+        left_logic_color = (0, 255, 0) if left_analysis['is_valid'] else (0, 0, 255)
+        right_logic_color = (0, 255, 0) if right_analysis['is_valid'] else (0, 0, 255)
+
+        logic_text_left = f"Logic: {'VALID' if left_analysis['is_valid'] else 'INVALID'}"
+        logic_text_right = f"Logic: {'VALID' if right_analysis['is_valid'] else 'INVALID'}"
+
+        cv2.putText(frame, logic_text_left, (50, 160),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, left_logic_color, 2)
+        cv2.putText(frame, logic_text_right, (mid_width + 50, 160),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, right_logic_color, 2)
+
+        # Display error count
+        cv2.putText(frame, f"Errors: {len(left_analysis['errors'])}", (50, 185),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, left_logic_color, 1)
+        cv2.putText(frame, f"Errors: {len(right_analysis['errors'])}", (mid_width + 50, 185),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, right_logic_color, 1)
 
         # Validate connections and show warnings
         left_validation = validate_connections(detections_left)
@@ -379,6 +557,31 @@ def main():
             for tag_id, details in right_details.get('component_details', {}).items():
                 status = "✓" if details['valid'] else "✗"
                 print(f"    {status} Tag {tag_id} ({details['part_name']}): {details['angle']:.1f}°")
+
+            print("\n=== LOGICAL ANALYSIS REPORT ===")
+            print("LEFT CIRCUIT:")
+            print(f"  Valid: {left_analysis['is_valid']}")
+            print("  Nets:", left_analysis['nets'])
+            if left_analysis['errors']:
+                print("  ERRORS:")
+                for error in left_analysis['errors']:
+                    print(f"    ! {error}")
+            if left_analysis['warnings']:
+                print("  Warnings:")
+                for warning in left_analysis['warnings']:
+                    print(f"    ? {warning}")
+
+            print("\nRIGHT CIRCUIT:")
+            print(f"  Valid: {right_analysis['is_valid']}")
+            print("  Nets:", right_analysis['nets'])
+            if right_analysis['errors']:
+                print("  ERRORS:")
+                for error in right_analysis['errors']:
+                    print(f"    ! {error}")
+            if right_analysis['warnings']:
+                print("  Warnings:")
+                for warning in right_analysis['warnings']:
+                    print(f"    ? {warning}")
             
             print("========================\n")
 
